@@ -1,0 +1,28 @@
+{
+  "name": "myrme",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "check": "node tools/check.mjs",
+    "e2e": "node tools/withLock.mjs playwright test",
+    "shots": "node tools/shots.mjs"
+  },
+  "dependencies": {
+    "lil-gui": "0.21.0",
+    "postprocessing": "6.39.6",
+    "simplex-noise": "4.0.3",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.0",
+    "@types/node": "22.20.5",
+    "@types/three": "0.187.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
+  }
+}
