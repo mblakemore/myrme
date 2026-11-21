@@ -276,6 +276,33 @@ describe('nav', () => {
     expect(nav.findPath(nest, top).status).toBe('found');
   });
 
+  it('no corner step through a diagonal pinch (one air face neighbour, no air staircase)', () => {
+    // solid rock with two straight tunnels whose ends only touch corner to corner; the one air
+    // cell beside the first tunnel's end is a dead end (its own way on to the second tunnel is
+    // pinched between two solid cells). Paths used to squeeze through and movers circled there.
+    const w = createWorld(32, 24, 24, 'open');
+    for (let y = 0; y < 24; y++) for (let z = 0; z < 24; z++) for (let x = 0; x < 32; x++) w.setCell(x, y, z, 0.4, Mat.Rock);
+    // 1-voxel tunnels over a denser floor (so the density gradient is well formed)
+    const tunnel = (x: number, y: number, z: number) => {
+      w.setCell(x, y, z, -0.3, Mat.Air);
+      w.setCell(x, y - 1, z, 1.5, Mat.Rock);
+    };
+    for (let x = 2; x <= 10; x++) tunnel(x, 10, 10);
+    tunnel(11, 10, 10); // the dead-end air face neighbour
+    for (let x = 11; x <= 20; x++) tunnel(x, 11, 11);
+    w.markAllDirty();
+    const nav = createNav(w);
+    const from = w.index(3, 10, 10);
+    const to = w.index(19, 11, 11);
+    expect(nav.isWalkable(from) && nav.isWalkable(to)).toBe(true);
+    expect(nav.findPath(from, to, 0, 200000).status).not.toBe('found');
+    // open the staircase (one more air cell) and the corner step is fine
+    w.setCell(11, 11, 10, -0.3, Mat.Air);
+    w.markAllDirty();
+    const nav2 = createNav(w);
+    expect(nav2.findPath(from, to, 0, 200000).status).toBe('found');
+  });
+
   it('large clearance cannot enter a 3-voxel tunnel (D11)', () => {
     const w = ground(20);
     for (let i = 0; i < 12; i++) w.dig({ x: 10 + i * 2, y: 10, z: 24 }, 1.6);
@@ -310,8 +337,14 @@ function bruteField(w: ReturnType<typeof ground>, nav: ReturnType<typeof createN
             if (!w.inBounds(x, y, z)) continue;
             const nc = w.index(x, y, z);
             if (dist[nc] !== HOME_UNREACHABLE || !nav.isWalkable(nc)) continue;
-            if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > 1) {
+            const axes = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+            if (axes === 2) {
               const ok = (dx !== 0 && !w.isSolid(c.x + dx, c.y, c.z)) || (dy !== 0 && !w.isSolid(c.x, c.y + dy, c.z)) || (dz !== 0 && !w.isSolid(c.x, c.y, c.z + dz));
+              if (!ok) continue;
+            } else if (axes === 3) {
+              // corner: an air staircase of axis steps
+              const air = (x: number, y: number, z: number) => !w.isSolid(c.x + x, c.y + y, c.z + z);
+              const ok = (air(dx, 0, 0) && (air(dx, dy, 0) || air(dx, 0, dz))) || (air(0, dy, 0) && (air(dx, dy, 0) || air(0, dy, dz))) || (air(0, 0, dz) && (air(dx, 0, dz) || air(0, dy, dz)));
               if (!ok) continue;
             }
             dist[nc] = d;

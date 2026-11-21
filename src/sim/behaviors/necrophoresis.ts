@@ -3,8 +3,7 @@ import { BALANCE } from '../data/balance';
 import { makeTask } from '../entities';
 import { dutyTask, nearestChamber } from '../systems/colonyState';
 import { sunSensitive } from '../systems/temperature';
-import { termiteSheeted } from '../systems/termiteBuild';
-import { envState } from '../systems/weatherEnv';
+import { termiteSheeted, termiteSunBurns } from '../systems/termiteBuild';
 import { dutyScore, finishDuty, takeJob } from './dutyCommon';
 import { ARRIVED, FAILED, approach, dropCarry, pickUpItem, pileCell, placeCarry } from './util';
 
@@ -22,7 +21,7 @@ function orphanCorpse(ant: Ant, sim: SimState): boolean {
  * for the night instead.
  */
 function sunBarred(sim: SimState, ant: Ant, colony: Colony): boolean {
-  if (!sunSensitive(ant) || envState(sim).sun <= BALANCE.b2.sunSensitiveExposure || termiteSheeted(sim, ant)) return false;
+  if (!sunSensitive(ant) || !termiteSunBurns(sim) || termiteSheeted(sim, ant)) return false;
   const midden = nearestChamber(colony, 'midden', ant.pos);
   return midden.cell >= 0 && (sim.nav as NavEx).isExposed(midden.cell);
 }

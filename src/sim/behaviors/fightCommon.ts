@@ -54,8 +54,12 @@ export function fightStep(sim: SimState, ant: Ant, target: Fighter, speedMul: nu
   const d = distance(ant.pos, target.pos);
   // melee footwork flag: movement keeps a firm separation between fighters (see moveSurface)
   ant.mem[MELEE_MEM] = sim.tick;
+  const mem = ant.mem;
   if (d <= reach * 0.92) {
-    ant.mem['ft.s'] = 0;
+    mem['ft.s'] = 0;
+    mem['ft.pn'] = 0;
+    mem['ft.bd'] = d;
+    mem['ft.bt'] = sim.tick;
     if (target.kind === 'ant') {
       // ant against ant: hold a ring slot at mandible distance (heads meeting, bodies apart) and
       // let the separation push sort the attackers around the victim — no pressing into a pile
@@ -75,7 +79,29 @@ export function fightStep(sim: SimState, ant: Ant, target: Fighter, speedMul: nu
     ant.intent.mode = 'none';
     return FAILED;
   }
-  const mem = ant.mem;
+  // Closing in means getting CLOSER THAN BEFORE: an ant steering straight at a target behind a
+  // wall or a tube roof slides along it at full speed (so "slow" never trips) and circles there
+  // for as long as the target stays. No progress for 1.5 s → path for a while; when pathing has
+  // not brought it into reach twice in a row the target counts as unreachable.
+  if (mem['ft.bi'] !== target.id) {
+    mem['ft.bi'] = target.id;
+    mem['ft.bd'] = d;
+    mem['ft.bt'] = sim.tick;
+    mem['ft.pn'] = 0;
+  } else if (d < (mem['ft.bd'] ?? Infinity) - 0.25) {
+    mem['ft.bd'] = d;
+    mem['ft.bt'] = sim.tick;
+  } else if (sim.tick - (mem['ft.bt'] ?? sim.tick) > 45 && !((mem['ft.p'] ?? 0) > sim.tick)) {
+    mem['ft.bt'] = sim.tick;
+    mem['ft.bd'] = d;
+    if ((mem['ft.pn'] = (mem['ft.pn'] ?? 0) + 1) > 2) {
+      mem['ft.pn'] = 0;
+      ignoreTarget(sim, ant, target.id);
+      ant.intent.mode = 'none';
+      return FAILED;
+    }
+    mem['ft.p'] = sim.tick + 90;
+  }
   if (d <= 7 && !((mem['ft.p'] ?? 0) > sim.tick)) {
     const slow = mem['ft.s'] ?? 0;
     if (slow > F.flankAfterTicks && d < 4) {
@@ -116,6 +142,7 @@ export function fightExit(ant: Ant): void {
   mem['ft.g'] = -1;
   mem['ft.s'] = 0;
   mem['ft.p'] = 0;
+  mem['ft.bi'] = 0;
   ant.targetId = 0;
   ant.intent.mode = 'none';
   if (ant.anim === 'bite') ant.anim = 'idle';

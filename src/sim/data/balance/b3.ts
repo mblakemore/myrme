@@ -183,6 +183,8 @@ export const b3Balance = {
     sunDry: 0.03,
     /** Daylight window (timeOfDay) in which the sun burns. */
     sunFrom: 0.27,
+    /** A job a termite was driven off by the sun is left alone this long (or until the sun stops burning). */
+    sunBarSeconds: 240,
     sunTo: 0.73,
     /** Health fraction below which a scorched termite drops everything and runs for cover. */
     shadeHealth: 0.7,

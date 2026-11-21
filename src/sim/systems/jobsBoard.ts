@@ -1,6 +1,6 @@
 import { smoothstep, type Ant, type Beacon, type Colony, type Job, type JobKind, type SimState, type Vec3 } from '../../core';
 import { BALANCE } from '../data/balance';
-import { getCaste } from '../data/species';
+import { getCaste, getSpecies } from '../data/species';
 import { getExt, type ColonyExt } from './colonyState';
 
 /**
@@ -99,9 +99,12 @@ export function claimJob(sim: SimState, colony: Colony, ant: Ant, kind: JobKind,
   let best: Job | null = null;
   let bestScore = -Infinity;
   const hasAvoid = colony.beacons.some((b) => b.kind === 'avoid');
+  const barred = getExt(sim, colony.id).sunBarred;
+  const shy = barred.size > 0 && getSpecies(ant.species).caps.sunSensitive;
   for (const j of colony.jobs) {
     if (j.kind !== kind || j.urgency <= 0 || j.assigned.length >= j.slots || j.cell < 0) continue;
     if (filter && !filter(j)) continue;
+    if (shy && (barred.get(j.id) ?? 0) > sim.tick) continue;
     if (hasAvoid && inAvoidZone(colony, j.pos)) continue;
     const d = Math.hypot(j.pos.x - ant.pos.x, j.pos.y - ant.pos.y, j.pos.z - ant.pos.z);
     const s = j.urgency - d * 0.012;

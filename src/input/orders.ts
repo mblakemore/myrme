@@ -2,7 +2,7 @@ import type { CellIndex, ColonyId, Command, CreatureRole, EntityId, EntityKind, 
 
 /**
  * Pure mapping from "what is under the cursor" to the contextual RMB order (§5.4):
- *   terrain → move · food source / food item → gather · enemy ant / hostile creature → attack ·
+ *   terrain → move (edible wood, for a wood-eating colony → gather) · food source / food item → gather · enemy ant / hostile creature → attack ·
  *   friendly ant → follow · Alt → guard (position or target) · Shift → queue.
  */
 
@@ -18,6 +18,8 @@ export interface OrderTarget {
   colony: ColonyId;
   creatureRole?: CreatureRole;
   itemKind?: ItemKind;
+  /** Terrain only: the hit voxel is wood/litter the player's species eats in place (termites). */
+  edible?: boolean;
 }
 
 export interface OrderMods {
@@ -42,7 +44,8 @@ export function contextOrderKind(target: OrderTarget, playerColony: ColonyId): O
     case 'item':
       return target.itemKind && GATHERABLE_ITEMS.includes(target.itemKind) ? 'gather' : 'move';
     default:
-      return 'move';
+      // termites: RMB on wood (or litter) chews it there
+      return target.kind === 'terrain' && target.edible ? 'gather' : 'move';
   }
 }
 

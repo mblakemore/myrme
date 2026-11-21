@@ -1,11 +1,13 @@
 import { HOME_UNREACHABLE, v3, type Ant, type Behavior, type NavEx, type SimState } from '../../core';
 import { BALANCE } from '../data/balance';
-import { dutyTask, getExt } from '../systems/colonyState';
+import { dutyTask, getExt, removeTask } from '../systems/colonyState';
+import { releaseJob } from '../systems/jobsBoard';
+import { sunAt } from '../systems/keeperEnv';
 import { sunSensitive } from '../systems/temperature';
-import { termiteSheeted } from '../systems/termiteBuild';
+import { termiteSheeted, termiteSunBurns } from '../systems/termiteBuild';
 import { envState } from '../systems/weatherEnv';
 import { bestCellNear } from './floodEscapeNav';
-import { FAILED, approach, dist, homeward, shuffle, stop } from './util';
+import { ARRIVED, FAILED, approach, dist, dropCarry, homeward, shuffle, steerTo, stop } from './util';
 
 /**
  * Weather shelter (band `survival`) — one behavior for every "get under cover" reason:
@@ -34,6 +36,26 @@ function exposed(sim: SimState, ant: Ant): boolean {
   return ant.cell >= 0 && (sim.nav as NavEx).isExposed(ant.cell);
 }
 
+/**
+ * A sun-sensitive worker caught in the burning sun on a colony duty gives that duty up for the
+ * day: whatever it carries is put down, the job goes back to the board and is barred for the
+ * colony's sun-sensitive workers while the sun burns (`ColonyExt.sunBarred`, honoured by
+ * `claimJob`). Builders at the works are exempt (they plaster themselves in), brood carriers keep
+ * their brood (they are taking it to safety), player orders are never touched.
+ */
+function deferSunnyDuty(sim: SimState, ant: Ant): void {
+  const t = dutyTask(ant);
+  if (!t || t.source !== 'colony' || t.kind === 'build' || t.kind === 'carryBrood') return;
+  if (ant.carrying && ant.carrying.kind !== 'brood') dropCarry(sim, ant);
+  if (t.jobId) {
+    const barred = getExt(sim, ant.colony).sunBarred;
+    barred.set(t.jobId, sim.tick + Math.round(BALANCE.b3.termites.sunBarSeconds * 30));
+    releaseJob(sim, ant, t.jobId);
+  }
+  removeTask(ant, t);
+  ant.mem['sh.bar'] = (ant.mem['sh.bar'] ?? 0) + 1; // diagnostics
+}
+
 export const seekShadeBehavior: Behavior = {
   id: 'seekShade',
   band: 'survival',
@@ -47,10 +69,14 @@ export const seekShadeBehavior: Behavior = {
     const out = exposed(sim, ant);
     // final round: termite builders at the works (shelter tube mouth, mound) stay on the job
     if (out && sim.tick - (ant.mem['tb.w'] ?? -1e9) < 30 && sim.weather.kind !== 'storm') return 0;
+    const shy = sunSensitive(ant) && termiteSunBurns(sim);
     if (out) {
-      if (env.sun > B.sunSensitiveExposure && sunSensitive(ant) && !termiteSheeted(sim, ant)) return 0.8;
+      if (shy && sunAt(sim, ant.cell, ant.pos) > 0 && !termiteSheeted(sim, ant)) return 0.8;
       if (ant.hydration < B.thirsty && env.temperatureAtCell(ant.cell) > B.dryTemp) return 0.75;
     }
+    // a termite driven in by the sun stays in for a moment (off the doorstep) instead of being
+    // sent straight back out by the next think
+    if (shy && (ant.mem[HOLD] ?? 0) > sim.tick) return 0.55;
     const cs = env.colonyState(ant.colony);
     if (cs.shelter === 'none') return 0;
     // final round: a colony short of food sends its foragers out in ordinary rain (and, when the stores are
@@ -77,16 +103,34 @@ export const seekShadeBehavior: Behavior = {
     const hd = nav.homeDistance(ant.colony, ant.cell);
     if (exposed(sim, ant)) {
       ant.mem[HOLD] = sim.tick + 150;
-      // far from home in the heat: any shade will do
+      if (sunSensitive(ant) && termiteSunBurns(sim)) deferSunnyDuty(sim, ant);
+      // far from home in the heat — or AT home with the sky open above (a breached chamber, the
+      // doorstep): any shade will do; homing would only stand it on the nest cell in the sun
       const cs = env.colonyState(ant.colony);
-      if ((hd === HOME_UNREACHABLE || hd > 70) && cs.shelter !== 'rain') {
+      if ((hd === HOME_UNREACHABLE || hd > 70 || hd <= 8) && cs.shelter !== 'rain') {
         let goal = ant.mem['sh.g'] ?? -1;
+        // a shade cell the path queue cannot reach (across a gap, behind a wall) is struck off
+        if (goal >= 0 && ant.path.goal === goal && ant.path.status === 'failed') {
+          ant.mem['sh.x'] = goal;
+          goal = -1;
+        }
         if (goal < 0 || !nav.isWalkable(goal) || sim.tick >= (ant.mem['sh.gu'] ?? 0)) {
-          goal = bestCellNear(sim, ant, 5, (cell, dx, dy, dz) => (nav.isExposed(cell) ? Infinity : dx * dx + dy * dy + dz * dz));
+          const linked = hd !== HOME_UNREACHABLE;
+          const bad = ant.mem['sh.x'] ?? -1;
+          goal = bestCellNear(sim, ant, 5, (cell, dx, dy, dz) => (cell === bad || nav.isExposed(cell) || (linked && nav.homeDistance(ant.colony, cell) === HOME_UNREACHABLE) ? Infinity : dx * dx + dy * dy + dz * dz));
           ant.mem['sh.g'] = goal;
           ant.mem['sh.gu'] = sim.tick + 90;
         }
-        if (goal >= 0 && approach(sim, ant, goal, null, 0.7, 1.15) !== FAILED) return;
+        if (goal >= 0) {
+          const r = approach(sim, ant, goal, null, 0.7, 1.15);
+          if (r === ARRIVED) {
+            // "there" by distance but still standing in the sun on the cell next to it (a wall
+            // or the rim of a skylight): step right into the shade instead of stopping
+            steerTo(ant, sim.world.cellCenter(goal, _c), 0.6);
+            return;
+          }
+          if (r !== FAILED) return;
+        }
       }
       // homing by direction can jitter at full speed on a lip without getting anywhere: when the
       // home distance stops dropping, let A* take the ant in

@@ -84,6 +84,13 @@ export interface ColonyExt {
    * stops feeding its workers one by one to enemy soldiers camped on a shared source.
    */
   danger: { x: number; y: number; z: number; until: Tick }[];
+  /**
+   * Sun-sensitive species (termites): job id → tick until which the job is left alone while the
+   * sun burns, because a worker on it was driven back by the sun (its route or target lies in the
+   * open). Without it every worker in turn took the job, walked into the sun, fled, and the next
+   * think sent it out again — all day long. See behaviors/seekShade.ts and `claimJob`.
+   */
+  sunBarred: Map<number, Tick>;
 }
 
 const DANGER_RADIUS = 9;
@@ -144,6 +151,7 @@ function makeExt(sim: SimState): ColonyExt {
     patrolPoints: [],
     entranceTrail: 0,
     danger: [],
+    sunBarred: new Map(),
     nurseryLoad: new Map(),
     lastQueenId: 0,
   };

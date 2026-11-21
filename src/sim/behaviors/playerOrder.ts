@@ -1,8 +1,10 @@
 import type { Ant, Behavior, CellIndex, Entity, SimState, Task, Vec3 } from '../../core';
 import { BALANCE } from '../data/balance';
+import { hasSpoil, runDigDuty, stopDigDuty } from '../systems/dig';
+import { GATHER_WOOD, woodDesignation } from '../systems/orders';
 import { biteTarget, isHostile, nearestHostile } from '../systems/ordersCombat';
 import { F_SCOUT, forageExit, runForage } from './forageCore';
-import { ARRIVED, FAILED, approach, clearWorkAnim, dist, shuffle, stop } from './util';
+import { ARRIVED, FAILED, approach, clearWorkAnim, dist, dropCarry, shuffle, stop } from './util';
 
 function pop(ant: Ant, sim: SimState, task: Task): void {
   const i = ant.tasks.indexOf(task);
@@ -60,7 +62,8 @@ export function engage(sim: SimState, ant: Ant, target: Entity & { pos: Vec3; ce
  *
  *   move    path to the cell, then pop
  *   gather  work the target food (or the food nearest the clicked point) until it is exhausted,
- *           hauling loads home and laying trail like any forager, then pop
+ *           hauling loads home and laying trail like any forager, then pop; termites sent to
+ *           wood chew the designated wood instead (A2a dig-site API, like a dig duty)
  *   attack  chase the target and bite it until it is dead, then pop; without a target
  *           (attack-move) go to the point and fight whatever hostile is near it
  *   guard   hold the position (persistent); bite hostiles that come close
@@ -97,6 +100,35 @@ export const playerOrderBehavior: Behavior = {
         return;
       }
       case 'gather': {
+        if (task.data === GATHER_WOOD) {
+          // termites: chew the designated wood (pulp → stores.wood) until it is gone or unreachable
+          const colony = sim.getColony(ant.colony);
+          const d = colony?.designations.find((x) => x.id === task.targetId);
+          // whatever is in the mandibles is put down first (spoil pellets are hauled out by the API)
+          if (ant.carrying && !hasSpoil(ant)) dropCarry(sim, ant);
+          let st = d && !d.done ? runDigDuty(sim, ant, dt, { designationId: d.id }) : 'done';
+          if (st === 'done' && d && !d.done) {
+            // every stamp of the bite is taken by a nest-mate: wait at the wood for a free one
+            st = 'idle';
+            if (task.cell >= 0 && approach(sim, ant, task.cell, null, 1.5) === FAILED) task.phase = 90;
+          }
+          if (st === 'done' && colony && (!d || d.done) && (ant.mem['po.wn'] = (ant.mem['po.wn'] ?? 0) + 1) < 8) {
+            // that bite is eaten: chew on into the wood next to it (a few bites per order)
+            const next = woodDesignation(sim, colony, task.pos ?? ant.pos, undefined, 5);
+            if (next) {
+              stopDigDuty(sim, ant);
+              task.targetId = next;
+              return;
+            }
+          }
+          if (st === 'done' || (st === 'idle' && ++task.phase > 90)) {
+            ant.mem['po.wn'] = 0;
+            stopDigDuty(sim, ant);
+            return pop(ant, sim, task);
+          }
+          if (st !== 'idle') task.phase = 0;
+          return;
+        }
         // no specific food given: walk to the point first, then search from there
         if (!task.targetId && task.data === 0 && !ant.carrying) {
           const r = approach(sim, ant, task.cell, null, 2.5);
@@ -176,7 +208,8 @@ export const playerOrderBehavior: Behavior = {
         pop(ant, sim, task);
     }
   },
-  exit(ant) {
+  exit(ant, sim) {
+    stopDigDuty(sim, ant);
     ant.intent.mode = 'none';
     ant.targetId = 0;
     ant.mem['po.g'] = -1;

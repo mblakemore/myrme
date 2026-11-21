@@ -1,5 +1,6 @@
 import {
   ISO,
+  MATERIALS,
   Mat,
   ORDER_PING_SECONDS,
   clamp,
@@ -506,6 +507,11 @@ export function createInput(): InputLayer {
       if (!hit) return;
       const pos = hit.airCell >= 0 ? sim.world.cellCenter(hit.airCell, v3()) : v3clone(hit.pos);
       target = { kind: 'terrain', id: 0, pos, cell: hit.airCell, colony: 0 };
+      const own = sim.getColony(sim.playerColony);
+      if (hit.solidCell >= 0 && own && getSpecies(own.species).caps.eatsWood && MATERIALS[hit.material]?.edibleByTermites) {
+        target.edible = true;
+        target.pos = v3clone(hit.pos);
+      }
     }
     const cmd = contextOrder(ids, target, { shift, alt }, sim.playerColony);
     if (!cmd) return;

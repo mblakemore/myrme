@@ -54,6 +54,12 @@ export interface PathStateEx extends PathState {
   partials?: number;
   /** `nav.editSeq` the current path was last validated against. */
   seq?: number;
+  /** Waypoint cell the progress record below belongs to, and the closest the mover has been to it. */
+  bW?: number;
+  bD?: number;
+  /** Waypoint cell that defeated the last re-plan, and how many re-plans in a row it has defeated. */
+  fW?: number;
+  fN?: number;
 }
 
 interface MoveCtx {
@@ -529,11 +535,21 @@ function moveSurface(sim: SimState, ctx: MoveCtx, m: Mover, dt: number, possesse
   if (following && p.status === 'following') {
     const c = sim.world.cellCenter(p.cells![p.index], _c);
     const after = Math.hypot(m.pos.x - c.x, m.pos.y - c.y, m.pos.z - c.z);
-    if (after > before - speed * dt * 0.2 || flags & CRAWL_BLOCKED) {
-      if (++p.stuck > B.stuckTicks) replan(sim, m, p);
-    } else if (p.stuck > 0) p.stuck -= 0.5;
+    // Progress means getting CLOSER THAN EVER to the waypoint, not merely closer than a tick
+    // ago: a mover bouncing on the spot (advance, bounce back — a lip, a step, a pinch) or
+    // circling the waypoint at full speed used to "make headway" half of the time, so its stuck
+    // count barely rose and the unstuck ladder took half a minute to get anywhere.
+    const wc = p.cells![p.index];
+    if (p.bW !== wc || p.bD === undefined) {
+      p.bW = wc;
+      p.bD = before;
+    }
+    if (!(flags & CRAWL_BLOCKED) && after < p.bD - speed * dt * 0.2) {
+      p.bD = after;
+      if (p.stuck > 0) p.stuck -= 0.5;
+    } else if (++p.stuck > B.stuckTicks) replan(sim, m, p);
     // `stuck` only resets when a waypoint is reached; it shrinks slowly while the mover makes
-    // headway, so one that oscillates in place (advance, bounce back) still times out.
+    // headway.
   }
 }
 
@@ -558,13 +574,22 @@ function replan(sim: SimState, m: Mover, p: PathStateEx): void {
       p.wN = B.maxReplans - 1;
     }
   }
+  // the same waypoint defeating two re-plans in a row is a step the crawl kernel cannot take
+  // (fresh paths keep routing through it): go straight to the scramble below
+  if (wp >= 0 && wp === p.fW) p.fN = (p.fN ?? 0) + 1;
+  else {
+    p.fW = wp;
+    p.fN = 1;
+  }
+  const stubborn = (p.fN ?? 0) >= 2;
   const n = (p.replans ?? 0) + 1;
-  if (n <= B.maxReplans && !wedged) {
+  if (n <= B.maxReplans && !wedged && !stubborn) {
     p.replans = n;
     p.status = 'none'; // the paths system requests a fresh path from the current cell
     return;
   }
   p.replans = 0;
+  p.fN = 0;
   // M3, step 4a: the SAME close waypoint defeated every re-plan — the path is right (A* keeps
   // returning it) but the crawl kernel cannot take the step (a thin ledge left by digging: termites
   // gnawing a log stalled a whole colony's diggers at one such spot, forever). Scramble onto the

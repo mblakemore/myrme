@@ -1,9 +1,13 @@
 import { BALANCE } from '../data/balance';
 import { releaseJob } from './jobsBoard';
-import { v3, v3clone, type Ant, type CellIndex, type Entity, type SimState, type SimSystem, type TaskKind, type Vec3 } from '../../core';
+import { ISO, MATERIALS, Mat, v3, v3clone, type Ant, type CellIndex, type Colony, type Designation, type Entity, type SimState, type SimSystem, type Task, type TaskKind, type Vec3 } from '../../core';
+import { getSpecies } from '../data/species';
 import { isFoodItem } from '../behaviors/util';
 import { makeTask } from '../entities';
 import { chamberOf } from './colonyState';
+
+/** `Task.data` of a player gather task whose `targetId` is a wood dig designation (termites). */
+export const GATHER_WOOD = 2;
 
 const ORDER_TASK: Record<string, TaskKind> = { move: 'move', gather: 'gather', attack: 'attack', guard: 'guard', follow: 'follow', exile: 'exile' };
 
@@ -43,13 +47,51 @@ function foodNear(sim: SimState, colony: number, p: Vec3, radius: number): Entit
   return best;
 }
 
-function insertPlayerTask(sim: SimState, ant: Ant, kind: TaskKind, cell: CellIndex, pos: Vec3, targetId: number): void {
+/**
+ * Termites: a gather order on wood (or leaf litter) means "chew it here". The edible voxel nearest
+ * the point (within `reach`) gets a dig designation of its own whose id the order carries; 0 when
+ * there is no edible voxel there.
+ */
+export function woodDesignation(sim: SimState, colony: Colony, p: Vec3, radius: number = BALANCE.b3.termites.woodBrush, reach = 2.5): number {
+  const w = sim.world;
+  const cx = Math.floor(p.x);
+  const cy = Math.floor(p.y);
+  const cz = Math.floor(p.z);
+  let best = -1;
+  let bestD = reach;
+  const R = Math.ceil(reach);
+  for (let dy = -R; dy <= R; dy++)
+    for (let dz = -R; dz <= R; dz++)
+      for (let dx = -R; dx <= R; dx++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        const z = cz + dz;
+        if (!w.inBounds(x, y, z)) continue;
+        const c = w.index(x, y, z);
+        if (w.density[c] < ISO || !MATERIALS[w.material[c]].edibleByTermites) continue;
+        const d = Math.hypot(x + 0.5 - p.x, y + 0.5 - p.y, z + 0.5 - p.z);
+        if (d < bestD) {
+          bestD = d;
+          best = c;
+        }
+      }
+  if (best < 0) return 0;
+  // always a designation of the order's own: the works retire their wood faces by their own rules
+  const at = w.cellCenter(best, v3());
+  const d: Designation = { id: sim.nextId(), kind: 'dig', colony: colony.id, center: at, radius, material: Mat.Air, done: false };
+  colony.designations.push(d);
+  sim.emit({ type: 'designationChanged', tick: sim.tick, op: 'add', designation: d });
+  return d.id;
+}
+
+function insertPlayerTask(sim: SimState, ant: Ant, kind: TaskKind, cell: CellIndex, pos: Vec3, targetId: number): Task {
   const task = makeTask(sim, kind, 'player', { cell, pos: v3clone(pos), targetId });
   // player tasks sit in front of colony/self tasks, in issue order
   let at = 0;
   while (at < ant.tasks.length && ant.tasks[at].source === 'player') at++;
   ant.tasks.splice(at, 0, task);
   ant.thinkAt = sim.tick; // react immediately (possessed ants keep the order for after release)
+  return task;
 }
 
 function clearPlayerTasks(ant: Ant): void {
@@ -77,7 +119,8 @@ function releaseFromBeacon(sim: SimState, ant: Ant): void {
  *
  *   move    → each ant gets its own cell near the point (golden-angle spread)
  *   gather  → `targetId` = food source/item, or the food nearest `pos` (within 8); if there is
- *             none the ants go to the point and search there
+ *             none the ants go to the point and search there. Wood-eaters (termites) sent to
+ *             wood chew it: `targetId` = a dig designation on it, `data` = GATHER_WOOD
  *   attack  → `targetId` = creature/ant: chase and bite; no target = attack-move to the point
  *   guard   → hold a spread position around the point (persistent)
  *   follow  → `targetId` = ant/creature to stay close to (persistent)
@@ -127,6 +170,13 @@ export const ordersSystem: SimSystem = {
     }
 
     if (cmd.order === 'gather' && base && (!target || (target.kind !== 'food' && target.kind !== 'item'))) target = foodNear(sim, sim.playerColony, base, 8);
+    // termites chew the wood they are sent to (before any loose food lying further off)
+    let wood = 0;
+    if (cmd.order === 'gather' && base && colony && getSpecies(colony.species).caps.eatsWood && (!target || !cmd.targetId)) {
+      // a bigger bite for a bigger crew, so every ant finds a stamp of its own
+      wood = woodDesignation(sim, colony, base, Math.min(4, BALANCE.b3.termites.woodBrush + 0.35 * Math.max(0, cmd.ids.length - 1)));
+      if (wood) target = undefined;
+    }
 
     const off = { x: 0, z: 0 };
     let n = 0;
@@ -152,7 +202,8 @@ export const ordersSystem: SimSystem = {
       const keepTarget = target && (cmd.order === 'gather' || cmd.order === 'attack' || cmd.order === 'follow') ? target.id : 0;
       // guard/move remember the spot they were given, not the click
       const pos = cmd.order === 'move' || cmd.order === 'guard' ? sim.world.cellCenter(cell, p) : at;
-      insertPlayerTask(sim, ant, ORDER_TASK[cmd.order], cell, pos, keepTarget);
+      const task = insertPlayerTask(sim, ant, ORDER_TASK[cmd.order], cell, pos, wood || keepTarget);
+      if (wood) task.data = GATHER_WOOD;
     }
     sim.emit({ type: 'orderIssued', tick: sim.tick, ids: cmd.ids.slice(), order: cmd.order, pos: base ? v3clone(base) : null });
   },

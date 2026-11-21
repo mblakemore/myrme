@@ -450,13 +450,26 @@ export class Nav implements NavEx {
 
   /** Can a mover step from cell `c` to its i-th neighbour? Target walkability is checked by the caller. */
   private canStep(c: CellIndex, i: number): boolean {
-    if (NB_AXES[i] === 1) return true;
+    const axes = NB_AXES[i];
+    if (axes === 1) return true;
     const den = this.den;
-    // at least one axis-aligned intermediate must be air (all three are in bounds because the
-    // neighbour is)
-    if (NB_DX[i] !== 0 && den[c + NB_DX[i]] < ISO_) return true;
-    if (NB_DY[i] !== 0 && den[c + NB_DY[i] * this.sxz] < ISO_) return true;
-    if (NB_DZ[i] !== 0 && den[c + NB_DZ[i] * this.sx] < ISO_) return true;
+    const ox = NB_DX[i];
+    const oy = NB_DY[i] * this.sxz;
+    const oz = NB_DZ[i] * this.sx;
+    if (axes === 2) {
+      // at least one axis-aligned intermediate must be air (all of them are in bounds because
+      // the neighbour is)
+      if (ox !== 0 && den[c + ox] < ISO_) return true;
+      if (oy !== 0 && den[c + oy] < ISO_) return true;
+      if (oz !== 0 && den[c + oz] < ISO_) return true;
+      return false;
+    }
+    // A corner step needs an air staircase of axis steps (c → one axis → two axes → target).
+    // One air face neighbour is not enough: it let paths through the diagonal pinch between two
+    // solid cells that share an edge (a gap no body fits through), and movers circled at it.
+    if (den[c + ox] < ISO_ && (den[c + ox + oy] < ISO_ || den[c + ox + oz] < ISO_)) return true;
+    if (den[c + oy] < ISO_ && (den[c + oy + ox] < ISO_ || den[c + oy + oz] < ISO_)) return true;
+    if (den[c + oz] < ISO_ && (den[c + oz + ox] < ISO_ || den[c + oz + oy] < ISO_)) return true;
     return false;
   }
 

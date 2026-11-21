@@ -152,8 +152,11 @@ describe('social immunity', () => {
     const env = envOf(sim)!;
     const nav = sim.nav as NavEx;
     const col = sim.colonies[0];
-    // pick a worker that is inside the nest
-    const host = workers(sim).find((a) => a.cell >= 0 && !nav.isExposed(a.cell) && a.pos.y < G - 5)!;
+    // pick a worker that is inside the nest — one with a nestmate in smelling range if there is
+    // one (who smells it first is otherwise down to where the crowd happens to be that second)
+    const inside = workers(sim).filter((a) => a.cell >= 0 && !nav.isExposed(a.cell) && a.pos.y < G - 5);
+    const near = (a: Ant) => workers(sim).some((b) => b !== a && Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y, b.pos.z - a.pos.z) < B.smellRadius);
+    const host = inside.find(near) ?? inside[0];
     expect(host).toBeTruthy();
     host.lifespan = Infinity;
     sim.command({ type: 'debugInfect', id: host.id, stage: 'erratic' });

@@ -10,6 +10,10 @@ describe('contextual RMB order mapping', () => {
   it('terrain → move with position and cell', () => {
     expect(contextOrder([1, 2], t({ cell: 77 }), none, P)).toEqual({ type: 'order', ids: [1, 2], order: 'move', pos, cell: 77 });
   });
+  it('edible terrain (wood, for a wood-eating colony) → gather at the point', () => {
+    expect(contextOrder([1, 2], t({ cell: 77, edible: true }), none, P)).toEqual({ type: 'order', ids: [1, 2], order: 'gather', pos, cell: 77 });
+    expect(contextOrder([1], t({ cell: 77, edible: true }), { shift: false, alt: true }, P)!.order).toBe('guard');
+  });
   it('copies the position (the hit object may be reused)', () => {
     const cmd = contextOrder([1], t({}), none, P)!;
     expect(cmd.pos).not.toBe(pos);

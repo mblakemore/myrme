@@ -1,6 +1,6 @@
-import { v3, type Brood, type FoodSource, type Item, type Mover, type SimState, type SimSystem, type Vec3 } from '../../core';
+import { v3, type Brood, type FoodSource, type Item, type Mover, type NavEx, type SimState, type SimSystem, type Vec3 } from '../../core';
 import { BALANCE } from '../data/balance';
-import { CRAWL_OK, orthonormalizeForward, projectToSurface } from './movementCrawl';
+import { CRAWL_EMBEDDED, CRAWL_LOST, CRAWL_OK, crawlStep, orthonormalizeForward, projectToSurface } from './movementCrawl';
 import { samplerFor } from './movementField';
 
 /**
@@ -67,8 +67,97 @@ function fallMover(sim: SimState, m: Mover, dt: number): void {
       // bottom of the world and still nothing to stand on: give up falling to avoid a loop
       m.falling = false;
       m.cell = sim.nav.nearestWalkable(m.pos.x, m.pos.y, m.pos.z, 6);
+    } else if (m.kind === 'ant') {
+      // touched down in a pinched crevice (two surfaces meeting at an acute angle: the field
+      // cancels out, nothing to project onto) — the fall loop stops here every tick, so the
+      // mover would hang "falling" on the spot forever (termites starved in such a crack under
+      // the meadow log). Step onto the nearest cell it can actually stand on instead (one the
+      // crawl kernel projects onto — the crack's own rim would only drop it straight back in).
+      // Ants only: creatures that wedge there have always stayed put.
+      if (landNear(sim, m, 3) || landNear(sim, m, 6)) m.falling = false;
     }
   }
+}
+
+const _su = v3();
+const _sf = v3();
+/** Path cost put on walkable cells inside a pinched crack (see `landNear`). */
+const CRACK_HAZARD = 120;
+/**
+ * Re-seat a mover that touched down in a crack on the nearest walkable cell (within `R`) where the
+ * crawl kernel keeps hold — standing still there must not lose the surface again (a cell whose
+ * surface slopes back into the crack would just drop it in once more, every tick). The walkable
+ * cells at the crack get a path cost so routes steer clear of it, and the mover plans afresh.
+ */
+function landNear(sim: SimState, m: Mover, R: number): boolean {
+  const w = sim.world;
+  const nav = sim.nav as NavEx;
+  const fx = m.pos.x;
+  const fy = m.pos.y;
+  const fz = m.pos.z;
+  const cx = Math.floor(fx);
+  const cy = Math.floor(fy);
+  const cz = Math.floor(fz);
+  const cand: number[] = [];
+  for (let dy = -R; dy <= R; dy++)
+    for (let dz = -R; dz <= R; dz++)
+      for (let dx = -R; dx <= R; dx++) {
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d > R * R) continue;
+        const x = cx + dx;
+        const y = cy + dy;
+        const z = cz + dz;
+        if (!w.inBounds(x, y, z)) continue;
+        const c = w.index(x, y, z);
+        if (nav.isWalkable(c, m.clearance)) cand.push(d * 1e8 + c);
+      }
+  cand.sort((p, q) => p - q);
+  _su.x = m.up.x;
+  _su.y = m.up.y;
+  _su.z = m.up.z;
+  _sf.x = m.forward.x;
+  _sf.y = m.forward.y;
+  _sf.z = m.forward.z;
+  let best = -1;
+  for (const k of cand) {
+    const c = k % 1e8;
+    w.cellCenter(c, m.pos);
+    if (projectToSurface(w, m.pos, m.rideHeight, _n) === CRAWL_OK) {
+      m.up.x = _n.x;
+      m.up.y = _n.y;
+      m.up.z = _n.z;
+      orthonormalizeForward(m.forward, m.up, _sf.x, _sf.y, _sf.z);
+      if (!(crawlStep(w, m, null, 0, 0, false) & (CRAWL_LOST | CRAWL_EMBEDDED))) {
+        best = c;
+        break;
+      }
+    }
+    m.up.x = _su.x;
+    m.up.y = _su.y;
+    m.up.z = _su.z;
+    m.forward.x = _sf.x;
+    m.forward.y = _sf.y;
+    m.forward.z = _sf.z;
+  }
+  if (best < 0) {
+    m.pos.x = fx;
+    m.pos.y = fy;
+    m.pos.z = fz;
+    return false;
+  }
+  for (let dy = -2; dy <= 2; dy++)
+    for (let dz = -2; dz <= 2; dz++)
+      for (let dx = -2; dx <= 2; dx++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        const z = cz + dz;
+        if (!w.inBounds(x, y, z) || Math.hypot(x + 0.5 - fx, y + 0.5 - fy, z + 0.5 - fz) > 1.8) continue;
+        const c = w.index(x, y, z);
+        if (c !== best && nav.isWalkable(c) && nav.hazardAt(c) === 0) nav.setHazard(c, CRACK_HAZARD);
+      }
+  m.cell = best;
+  if (m.path.status !== 'none') m.path.status = 'none';
+  return true;
 }
 
 /** Seats a loose thing on the surface under/around `e.pos`; returns false if nothing is in reach. */

@@ -5,6 +5,7 @@ import {
   Mat,
   asSimEvent,
   b3StateOf,
+  envOf,
   getMapExtras,
   v3,
   v3clone,
@@ -117,6 +118,8 @@ interface ColonyCtx {
   opsDone: number;
   /** Chambers known to be open to the sky by design (never "breached"). */
   openChambers: Set<number>;
+  /** Breached chambers whose shaft cannot be plugged without cutting the colony off: next re-check tick. */
+  breachWait: Map<number, number>;
   seenChambers: Set<number>;
   state: TermiteWorksState;
 }
@@ -142,7 +145,7 @@ function colonyCtx(sim: SimState, colony: Colony): ColonyCtx {
   let cc = ctx.colonies.get(colony.id);
   if (!cc) {
     const state: TermiteWorksState = { colony: colony.id, tubes: [], mound: { pos: v3clone(colony.nestPos), height: 0, stamps: 0, chimneys: 0 }, breaches: [], woodFaces: [], scorched: 0 };
-    cc = { colony: colony.id, wood: null, woodPtr: 0, faces: new Map(), faceStand: -1, openStand: -1, noStand: new Set(), windfallNext: 0, litter: [], zoneI: 0, slot: { job: null }, op: null, serial: 0, tubes: [], tubeRetry: 0, tubeServed: -1, moundBase: null, moundI: 0, moundNext: 0, moundSkips: 0, opsDone: 0, openChambers: new Set(), seenChambers: new Set(), state };
+    cc = { colony: colony.id, wood: null, woodPtr: 0, faces: new Map(), faceStand: -1, openStand: -1, noStand: new Set(), windfallNext: 0, litter: [], zoneI: 0, slot: { job: null }, op: null, serial: 0, tubes: [], tubeRetry: 0, tubeServed: -1, moundBase: null, moundI: 0, moundNext: 0, moundSkips: 0, opsDone: 0, openChambers: new Set(), breachWait: new Map(), seenChambers: new Set(), state };
     ctx.colonies.set(colony.id, cc);
     if (getSpecies(colony.species).caps.canFill) {
       b3StateOf(sim).termite.push(state);
@@ -544,10 +547,24 @@ function edibleAround(w: SimState['world'], cx: number, cy: number, cz: number, 
   return n;
 }
 
-/** Does the sun (or the lamp) currently burn anywhere? */
-function sunActive(sim: SimState): boolean {
+/**
+ * Does the sun (or the keeper's lamp) currently burn termites anywhere? ONE signal for the damage
+ * (`sunAndPellets`), the flight from it (behaviors/seekShade.ts), the day-time choice of wood
+ * faces and the corpse run (necrophoresis). They used to disagree: termites were scorched as soon
+ * as the sun was up at all (B2 sun > 0.05) but only took cover above `sunSensitiveExposure`
+ * (0.35), so at dawn, at dusk and all through an overcast day the colony worked in the open and
+ * burned to death without ever fleeing.
+ */
+export function termiteSunBurns(sim: SimState): boolean {
   const T = BALANCE.b3.termites;
-  return sunIsUp(sim, T.sunFrom, T.sunTo);
+  if (!sunIsUp(sim, T.sunFrom, T.sunTo)) return false;
+  if (sim.weather.lamp) return true;
+  const env = envOf(sim) as { sun?: number } | null;
+  return !env || typeof env.sun !== 'number' || env.sun > BALANCE.b2.sunSensitiveExposure;
+}
+
+function sunActive(sim: SimState): boolean {
+  return termiteSunBurns(sim);
 }
 
 // ---- autonomous works (canFill) ------------------------------------------------------------------
@@ -556,8 +573,11 @@ function newOp(cc: ColonyCtx, sim: SimState, kind: TermiteOp['kind'], pos: Vec3,
   return { serial: ++cc.serial, kind, pos: v3clone(pos), cell, reach: radius + 2.2, progress: 0, work, mud, radius, startedTick: sim.tick, fails: 0 };
 }
 
-function fillGuarded(sim: SimState, pos: Vec3, radius: number): number {
+function fillGuarded(sim: SimState, pos: Vec3, radius: number, colonyId?: number): number {
   const w = sim.world;
+  // never wall the colony off from itself: a tube arch or a mound stamp that lands in a gallery
+  // (the walking route to the wood starts in the royal chamber's climb into the log) would seal it
+  if (colonyId !== undefined && plugCuts(sim, colonyId, pos.x, pos.y, pos.z, radius)) return 0;
   const near = sim.spatial.queryMovers(pos.x, pos.y, pos.z, radius + 1.5, _occ);
   const res = w.fill(pos, radius, Mat.Mud, {
     isOccupied: (cell) => {
@@ -569,6 +589,107 @@ function fillGuarded(sim: SimState, pos: Vec3, radius: number): number {
 }
 
 
+/**
+ * Is any part of a chamber open to the sky? Checks every column over the chamber's footprint, not
+ * just its floor cell: the royal chamber's gallery runs straight up into the deadwood, and once
+ * the log above it was eaten through, the sun shone in beside the floor cell (which stayed
+ * "covered") — the breach was never seen and the colony burned in its own royal chamber. `out`
+ * gets the open column nearest the centre.
+ */
+function skylight(sim: SimState, pos: Vec3, radius: number, out: Vec3): boolean {
+  const nav = sim.nav as NavEx;
+  const R = Math.ceil(radius);
+  const cx = Math.floor(pos.x);
+  const cz = Math.floor(pos.z);
+  const roof = pos.y + radius + 0.5;
+  let best = Infinity;
+  for (let dz = -R; dz <= R; dz++)
+    for (let dx = -R; dx <= R; dx++) {
+      const d2 = dx * dx + dz * dz;
+      if (d2 > radius * radius || d2 >= best) continue;
+      if (nav.skyHeight(cx + dx, cz + dz) > roof) continue;
+      best = d2;
+      out.x = cx + dx + 0.5;
+      out.z = cz + dz + 0.5;
+    }
+  return best < Infinity;
+}
+
+/**
+ * Would a mud fill (sphere of `brush` at x,y,z) cut nest-connected walkable cells around it off
+ * from the nest? Flood fill over walkable cells (26-neighbourhood) avoiding the filled volume, from
+ * the cell just outside it that lies nearest home: every other walkable, home-connected cell just
+ * outside the fill must still be reached. Conservative — a detour longer than the flood budget
+ * counts as cut.
+ */
+export function plugCuts(sim: SimState, colonyId: number, px: number, py: number, pz: number, brush: number): boolean {
+  const nav = sim.nav as NavEx;
+  const w = sim.world;
+  const inner = brush + 1.6;
+  const outer = brush + 3.6;
+  const plugged = (x: number, y: number, z: number) => Math.hypot(x + 0.5 - px, y + 0.5 - py, z + 0.5 - pz) < inner;
+  const shell: number[] = [];
+  const R = Math.ceil(outer);
+  for (let dy = -R; dy <= R; dy++)
+    for (let dz = -R; dz <= R; dz++)
+      for (let dx = -R; dx <= R; dx++) {
+        const x = Math.floor(px) + dx;
+        const y = Math.floor(py) + dy;
+        const z = Math.floor(pz) + dz;
+        if (!w.inBounds(x, y, z)) continue;
+        const d = Math.hypot(x + 0.5 - px, y + 0.5 - py, z + 0.5 - pz);
+        if (d < inner || d > outer) continue;
+        const c = w.index(x, y, z);
+        if (nav.isWalkable(c) && nav.homeDistance(colonyId, c) !== HOME_UNREACHABLE) shell.push(c);
+      }
+  if (shell.length < 2) return false;
+  // flood from the shell cell nearest home (the nest side)
+  let from = shell[0];
+  for (const c of shell) if (nav.homeDistance(colonyId, c) < nav.homeDistance(colonyId, from)) from = c;
+  // flood the walkable graph (no box: the way round may lead out of the nest and back in) until
+  // every shell cell is reached, or the budget runs out — then they count as cut off
+  const n = w.sx * w.sy * w.sz;
+  if (!_seen || _seen.length !== n) _seen = new Uint32Array(n);
+  const seen = _seen;
+  const mark = ++_seenMark;
+  let left = shell.length;
+  const want = new Set(shell);
+  const q = _flood;
+  q.length = 0;
+  seen[from] = mark;
+  q.push(from);
+  if (want.delete(from)) left--;
+  const sxz = w.sx * w.sz;
+  for (let h = 0; h < q.length && left > 0 && h < PLUG_FLOOD_BUDGET; h++) {
+    const c = q[h];
+    const cy = (c / sxz) | 0;
+    const cz = ((c - cy * sxz) / w.sx) | 0;
+    const cx = c - cy * sxz - cz * w.sx;
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dz = -1; dz <= 1; dz++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const x = cx + dx;
+          const y = cy + dy;
+          const z = cz + dz;
+          if (!w.inBounds(x, y, z)) continue;
+          const k = x + w.sx * (z + w.sz * y);
+          if (seen[k] === mark) continue;
+          seen[k] = mark;
+          if (plugged(x, y, z) || !nav.isWalkable(k)) continue;
+          q.push(k);
+          if (want.delete(k)) left--;
+        }
+  }
+  return left > 0;
+}
+let _seen: Uint32Array | null = null;
+let _seenMark = 0;
+const _flood: number[] = [];
+/** Cells a `plugCuts` flood may visit before it gives up and calls the fill a cut. */
+const PLUG_FLOOD_BUDGET = 60000;
+/** How far up the shaft a breach plug may move to keep from sealing a gallery. */
+const PLUG_CLIMB = 14;
+
 function findBreach(sim: SimState, colony: Colony, cc: ColonyCtx): TermiteOp | null {
   const T = BALANCE.b3.termites;
   const nav = sim.nav as NavEx;
@@ -576,7 +697,7 @@ function findBreach(sim: SimState, colony: Colony, cc: ColonyCtx): TermiteOp | n
   let op: TermiteOp | null = null;
   for (const ch of colony.chambers) {
     if (ch.kind === 'entrance' || ch.kind === 'midden' || ch.cell < 0) continue;
-    const open = nav.isExposed(ch.cell);
+    const open = skylight(sim, ch.pos, ch.radius, _q);
     if (!cc.seenChambers.has(ch.id)) {
       cc.seenChambers.add(ch.id);
       if (open) cc.openChambers.add(ch.id); // built that way
@@ -586,10 +707,22 @@ function findBreach(sim: SimState, colony: Colony, cc: ColonyCtx): TermiteOp | n
       cc.openChambers.delete(ch.id);
       continue;
     }
-    if (cc.openChambers.has(ch.id)) continue;
-    // plug the shaft at roof level, just above the chamber
-    sim.world.cellCenter(ch.cell, _p);
-    _p.y = ch.pos.y + Math.min(ch.radius, 3) + 1.6;
+    if (cc.openChambers.has(ch.id) || sim.tick < (cc.breachWait.get(ch.id) ?? 0)) continue;
+    // plug the shaft where the sky comes in: at roof level just above the chamber, or — when the
+    // shaft is the colony's gallery (the royal chamber's climb into the deadwood) and a plug
+    // there would cut the nest off from everyone above it — higher up, past where the gallery
+    // branches off. If every height would cut the colony off, live with the opening for a while
+    // (the sun-shy step into the shade; a plug that strands half the colony starves it).
+    _p.x = _q.x;
+    _p.z = _q.z;
+    let y = ch.pos.y + Math.min(ch.radius, 3) + 1.6;
+    const top = Math.min(y + PLUG_CLIMB, sim.world.sy - 2);
+    while (y < top && plugCuts(sim, colony.id, _q.x, y, _q.z, T.plugBrush)) y += 1;
+    if (y >= top) {
+      cc.breachWait.set(ch.id, sim.tick + 60 * 30);
+      continue;
+    }
+    _p.y = y;
     cc.state.breaches.push(v3clone(_p));
     if (!op) {
       const stand = standNear(sim, colony.id, Math.floor(_p.x), Math.floor(_p.y), Math.floor(_p.z), 3.4);
@@ -895,7 +1028,7 @@ function executeOp(sim: SimState, colony: Colony, cc: ColonyCtx, op: TermiteOp, 
   colony.stores.mud = Math.max(0, colony.stores.mud - op.mud);
   cc.opsDone++;
   let added = 0;
-  if (op.kind !== 'tube') added = fillGuarded(sim, op.pos, op.radius);
+  if (op.kind !== 'tube') added = fillGuarded(sim, op.pos, op.radius, colony.id);
   if (op.kind === 'tube') {
     const tube = cc.tubes[cc.tubes.length - 1];
     if (tube && !tube.state.done) {
@@ -922,13 +1055,13 @@ function executeOp(sim: SimState, colony: Colony, cc: ColonyCtx, op: TermiteOp, 
           _q.x = a.x - tz * side * T.tubeWallOffset;
           _q.y = a.y + 0.6;
           _q.z = a.z + tx * side * T.tubeWallOffset;
-          added += fillGuarded(sim, _q, T.tubeWall);
+          added += fillGuarded(sim, _q, T.tubeWall, colony.id);
         }
       }
       _q.x = a.x;
       _q.y = a.y + T.tubeRoofHeight;
       _q.z = a.z;
-      added += fillGuarded(sim, _q, T.tubeRoof);
+      added += fillGuarded(sim, _q, T.tubeRoof, colony.id);
       tube.state.built = k + 1;
       sim.emit(asSimEvent({ type: 'shelterTube', tick: sim.tick, op: 'segment', tube: tube.state.id, colony: colony.id, pos: v3clone(op.pos) }));
       if (tube.state.built >= tube.state.segments) {
@@ -1179,6 +1312,9 @@ export const termiteBuildSystem: SimSystem = {
       if (!getExt(sim, colony.id).active) continue;
       const cc = colonyCtx(sim, colony);
       const T = BALANCE.b3.termites;
+      // jobs barred by the sun are open again once it stops burning
+      const barred = getExt(sim, colony.id).sunBarred;
+      if (barred.size > 0 && (!sunActive(sim) || barred.size > 64)) for (const [id, until] of barred) if (!sunActive(sim) || until <= sim.tick) barred.delete(id);
       if (caps.eatsWood) {
         // digestion
         const d = Math.min(colony.stores.wood, T.digestPerWorker * Math.max(1, Math.min(T.digestWorkersMax, countWorkers(sim, colony))));
