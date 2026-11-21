@@ -159,6 +159,18 @@ export const a2bBalance = {
   followDistance: 2.2,
   guardLeash: 1.6,
   attackRange: 1.3,
+  /** An attack order is dropped when its target gets this far from where the order was given... */
+  attackLeash: 30,
+  /** ...or when the ant has not been within reach of it for this many seconds. */
+  attackGiveUp: 20,
+  /** Attack beacons expire after this many seconds with nothing hostile near them... */
+  attackBeaconIdle: 20,
+  /** ...and in any case after this long (a beacon on a living rival nest excepted). */
+  attackBeaconLife: 180,
+  /** After a direct order an ant is not drafted by a beacon / war party for this many seconds. */
+  beaconOrderCooldown: 60,
+  /** Brain watchdog: seconds an ant may try to get somewhere without any progress before it re-plans (twice that: drops the task). */
+  watchdogSeconds: 12,
   /** Possession. */
   possessBiteRange: 1.5,
   possessDigCooldown: 0.35,

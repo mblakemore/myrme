@@ -126,6 +126,18 @@ export const playerOrderBehavior: Behavior = {
           }
         }
         if (target.kind !== 'ant' && target.kind !== 'creature') return pop(ant, sim, task);
+        if (!target.alive) return pop(ant, sim, task);
+        // An attack order ends when the target is dead, has run off beyond the leash from where
+        // the order was given, or has stayed out of reach for too long (unreachable, or a
+        // fleeing target it cannot catch) — the ant then goes back to its duties.
+        const mem = ant.mem;
+        if (mem['po.tid'] !== task.id) {
+          mem['po.tid'] = task.id;
+          mem['po.near'] = sim.tick;
+        }
+        if (dist(ant.pos, target.pos) <= B.attackRange + 1.5) mem['po.near'] = sim.tick;
+        const anchor = task.targetId ? task.pos : null;
+        if ((anchor && dist(target.pos, anchor) > B.attackLeash) || sim.tick - (mem['po.near'] ?? sim.tick) > B.attackGiveUp * 30) return pop(ant, sim, task);
         const r = engage(sim, ant, target, 'po.g');
         if (r === FAILED && ++task.phase > 3) pop(ant, sim, task);
         return;

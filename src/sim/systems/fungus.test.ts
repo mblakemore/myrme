@@ -24,7 +24,9 @@ describe('zombie fungus arc', () => {
     const sim = world(5, false);
     const env = envOf(sim)!;
     const nav = sim.nav as NavEx;
-    const host = workers(sim)[2];
+    // a worker standing on its own, so the dusting below catches nobody else (the arc is the host's)
+    const ws = workers(sim);
+    const host = ws.slice(2).find((a) => ws.every((b) => b === a || Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y, b.pos.z - a.pos.z) > 2.5)) ?? ws[2];
     host.lifespan = Infinity;
     // exposure: dustings build the load; one is not enough
     expect(env.exposeToSpores(host.pos, 2, 0.4)).toBeGreaterThan(0);
@@ -240,8 +242,9 @@ describe('social immunity', () => {
 
   it('an infected corpse left in the nest fruits on the ground; necrophoresis prevents it', () => {
     const run = (undertakers: boolean): { stalks: number; bursts: number; infected: number } => {
-      // (seed-sensitive: a ground burst only catches ants that happen to pass; final round moved 8 → 12)
-      const sim = world(12, false);
+      // (seed-sensitive: a ground burst only catches ants that happen to pass — about one seed in
+      // twenty; final round moved 8 → 12, the lip-homing fix 12 → 21)
+      const sim = world(21, false);
       const env = envOf(sim)!;
       const nav = sim.nav as NavEx;
       const col = sim.colonies[0];

@@ -87,6 +87,8 @@ export function raidCandidates(sim: SimState, colony: Colony): Ant[] {
     if (!a.alive || a.colony !== colony.id) continue;
     if (a.caste === 'queen' || a.caste === 'king' || a.caste === 'alate') continue;
     if (a.possessed || a.followId || a.mem['raid'] || a.mem['beacon'] || a.mem['exiled'] || hasPlayerTask(a)) continue;
+    // just given a direct order by the player: not drafted straight back into a war party
+    if ((a.mem['bc.no'] ?? 0) > sim.tick) continue;
     if (a.carrying?.kind === 'brood' || healthFrac(a) < 0.6 || a.infection.stage !== 'none') continue;
     // young workers stay with the brood
     if (a.caste === 'worker' && Number.isFinite(a.lifespan) && a.age < a.lifespan * 0.12) continue;

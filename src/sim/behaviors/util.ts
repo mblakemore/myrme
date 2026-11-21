@@ -74,13 +74,8 @@ export function homeward(sim: SimState, ant: Ant, speedMul = 1): boolean {
     ant.intent.mode = 'none';
     return true;
   }
-  let n = ant.cell;
-  for (let k = 0; k < 3; k++) {
-    const s = sim.nav.homeStep(ant.colony, n);
-    if (s < 0) break;
-    n = s;
-  }
-  if (n === ant.cell) return false;
+  const nav = sim.nav;
+  const hd = nav.homeDistance(ant.colony, ant.cell);
   // stuck detection: homing by direction can wedge on awkward geometry → use A* for a while
   if (ant.intent.mode === 'dir' && ant.moveSpeed < ant.speed * 0.2) {
     const s = (mem['hm.s'] ?? 0) + 1;
@@ -91,7 +86,34 @@ export function homeward(sim: SimState, ant: Ant, speedMul = 1): boolean {
       return false;
     }
   } else mem['hm.s'] = 0;
-  sim.world.cellCenter(n, _c);
+  // ...and it can also jitter at full speed without getting anywhere (a sharp lip: two cells
+  // whose field steps pull opposite ways): the home distance itself must keep dropping
+  if (mem['hm.lt'] === undefined || sim.tick - mem['hm.lt'] > 15 || hd < (mem['hm.b'] ?? Infinity)) {
+    mem['hm.b'] = hd;
+    mem['hm.bt'] = sim.tick;
+  } else if (sim.tick - (mem['hm.bt'] ?? sim.tick) > 75) {
+    mem['hm.bt'] = sim.tick;
+    mem['hm.a'] = -1;
+    mem['hm.no'] = sim.tick + 240;
+    return false;
+  }
+  mem['hm.lt'] = sim.tick;
+  // The aim cell is latched until it is reached (or overtaken): re-deriving it from `ant.cell`
+  // every tick makes an ant standing on a cell boundary at a convex lip flip between two aims
+  // that pull opposite ways along the surface — it turns on the spot and never crosses.
+  let aim = mem['hm.a'] ?? -1;
+  if (aim >= 0) {
+    const ha = nav.homeDistance(ant.colony, aim);
+    sim.world.cellCenter(aim, _c);
+    if (ha === HOME_UNREACHABLE || hd <= ha || sim.tick >= (mem['hm.au'] ?? 0) || tangentDist2(ant, _c) < 0.2) aim = -1;
+  }
+  if (aim < 0) {
+    aim = homeAim(sim, ant);
+    if (aim < 0) return false;
+    mem['hm.a'] = aim;
+    mem['hm.au'] = sim.tick + 45;
+    sim.world.cellCenter(aim, _c);
+  }
   const it = ant.intent;
   it.mode = 'dir';
   it.dir.x = _c.x - ant.pos.x;
@@ -99,6 +121,39 @@ export function homeward(sim: SimState, ant: Ant, speedMul = 1): boolean {
   it.dir.z = _c.z - ant.pos.z;
   it.speedMul = speedMul;
   return true;
+}
+
+/** Squared distance from the ant to `p` measured in its tangent plane. */
+function tangentDist2(ant: Ant, p: Vec3): number {
+  const dx = p.x - ant.pos.x;
+  const dy = p.y - ant.pos.y;
+  const dz = p.z - ant.pos.z;
+  const dn = dx * ant.up.x + dy * ant.up.y + dz * ant.up.z;
+  return dx * dx + dy * dy + dz * dz - dn * dn;
+}
+
+/**
+ * Homing aim: a cell up to 3 steps down the home field — but never one that lies (almost)
+ * straight beneath the ant's surface (the field shortcut over a lip into a shaft): its
+ * tangent-plane direction is meaningless and can point backwards. Falls back to fewer steps.
+ */
+function homeAim(sim: SimState, ant: Ant): CellIndex {
+  let n = ant.cell;
+  let aim = -1;
+  for (let k = 0; k < 3; k++) {
+    const s = sim.nav.homeStep(ant.colony, n);
+    if (s < 0) break;
+    n = s;
+    sim.world.cellCenter(n, _c);
+    const dx = _c.x - ant.pos.x;
+    const dy = _c.y - ant.pos.y;
+    const dz = _c.z - ant.pos.z;
+    const dn = dx * ant.up.x + dy * ant.up.y + dz * ant.up.z;
+    const t2 = dx * dx + dy * dy + dz * dz - dn * dn;
+    if (aim >= 0 && dn < 0 && t2 < dn * dn * 0.36) break;
+    aim = n;
+  }
+  return aim === ant.cell ? -1 : aim;
 }
 
 /** Steer along `dir` (world space). */

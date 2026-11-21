@@ -167,7 +167,12 @@ export class App {
     this.game = null;
     if (!g) return;
     if (window.__myrme === g.debug) delete window.__myrme;
-    g.dispose();
+    try {
+      g.dispose();
+    } catch (err) {
+      // a half-broken game must never block the way back to the menu
+      console.warn('[myrme] error while disposing the game', err);
+    }
   }
 
   private menuParams(map: MapId, faction: SpeciesId, seed: number): UrlParams {
@@ -239,8 +244,15 @@ export class App {
     } catch (err) {
       console.error('[myrme] could not start the game', err);
       this.disposeGame();
+      // The loading screen sits on top of every menu layer: drop it at once, or the menu behind it
+      // is unclickable and the only way out is a page reload.
+      this.menu?.loadingEl.classList.remove('ms-show', 'ms-in');
+      // Back to the setup step with the same choices, so a different seed / size / quality is one
+      // click away.
       this.showTitle();
-      this.toast('The colony could not be founded. Try another seed or a lower quality.');
+      if (this.menu) this.menu.go('setup');
+      const detail = err instanceof Error && err.message ? ` (${err.message.replace(/^THREE\.\w+:\s*/, '').slice(0, 140)})` : '';
+      this.toast(`The colony could not be founded${detail}. Try another seed, the small size, or a lower quality in Settings → Graphics.`);
       this.scheduleAttract();
     } finally {
       this.root.style.transition = '';
@@ -266,6 +278,8 @@ export class App {
       await sleep(250);
       await this.hideLoadingScreen();
     } finally {
+      // never leave the loading screen covering the menu
+      this.menu?.loadingEl.classList.remove('ms-show', 'ms-in');
       this.busy = false;
     }
     this.scheduleAttract();

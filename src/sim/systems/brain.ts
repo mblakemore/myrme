@@ -1,6 +1,66 @@
 import { BEHAVIOR_BANDS, hash01, type Ant, type Behavior, type BehaviorBand, type SimState, type SimSystem } from '../../core';
 import { BEHAVIORS } from '../behaviors';
 import { BALANCE } from '../data/balance';
+import { removeTask } from './colonyState';
+import { releaseJob } from './jobsBoard';
+import type { PathStateEx } from './movement';
+
+/** Behaviors the watchdog leaves alone: scripted end states and group moves with their own clocks. */
+const WATCHDOG_EXEMPT: Readonly<Record<string, 1>> = { infected: 1, raft: 1, nuptial: 1, queen: 1 };
+
+/**
+ * Brain watchdog (safety net, checked at think time): an ant that keeps TRYING to go somewhere
+ * (a goto, or a brisk directed walk — not a resting shuffle) without getting anywhere and without
+ * its behavior / task / phase changing is wedged on something no behavior noticed.
+ *   after `watchdogSeconds`      re-plan: drop the path, home by A* for a while, think afresh
+ *   after twice that             give the front task up (its job reservation goes back to the
+ *                                board; a dead player order is dropped) and think afresh
+ * Progress (moving > 1.5 voxels from the anchor, or any change of behavior/task/phase/load)
+ * resets the clock.
+ */
+function watchdog(ant: Ant, sim: SimState, current: Behavior | undefined, behaviorKey: (b: Behavior | undefined) => number): boolean {
+  const mem = ant.mem;
+  const t = ant.tasks[0];
+  const sig = (t ? t.id * 16 + t.phase : 0) * 4 + (ant.carrying ? 1 + (ant.carrying.kind === 'brood' ? 1 : 0) : 0);
+  const it = ant.intent;
+  const trying = !ant.falling && (it.mode === 'goto' || (it.mode === 'dir' && it.speedMul > 0.5));
+  const dx = ant.pos.x - (mem['wd.x'] ?? 1e9);
+  const dy = ant.pos.y - (mem['wd.y'] ?? 1e9);
+  const dz = ant.pos.z - (mem['wd.z'] ?? 1e9);
+  if (!trying || !current || WATCHDOG_EXEMPT[current.id] || ant.caste === 'queen' || ant.caste === 'king' || mem['wd.s'] !== sig || mem['wd.b'] !== behaviorKey(current) || dx * dx + dy * dy + dz * dz > 2.25) {
+    mem['wd.x'] = ant.pos.x;
+    mem['wd.y'] = ant.pos.y;
+    mem['wd.z'] = ant.pos.z;
+    mem['wd.s'] = sig;
+    mem['wd.b'] = behaviorKey(current);
+    mem['wd.t'] = sim.tick;
+    mem['wd.n'] = 0;
+    return false;
+  }
+  const limit = BALANCE.a2b.watchdogSeconds * 30;
+  if (sim.tick - (mem['wd.t'] ?? sim.tick) < limit) return false;
+  mem['wd.t'] = sim.tick;
+  const stage = (mem['wd.n'] ?? 0) + 1;
+  mem['wd.n'] = stage;
+  // stage 1: re-plan from scratch
+  const p = ant.path as PathStateEx;
+  if (p.ticket) sim.nav.cancelPath(p.ticket);
+  p.ticket = 0;
+  p.cells = null;
+  p.status = 'none';
+  p.replans = 0;
+  p.partials = 0;
+  mem['hm.no'] = sim.tick + 240;
+  mem['hm.a'] = -1;
+  if (stage >= 2 && t) {
+    // stage 2: this task is not going to happen from here
+    if (t.jobId) releaseJob(sim, ant, t.jobId);
+    removeTask(ant, t);
+    mem['wd.n'] = 0;
+  }
+  mem['wd.c'] = (mem['wd.c'] ?? 0) + 1; // diagnostics: how often the watchdog had to step in
+  return true;
+}
 
 /**
  * The brain (§5.2).
@@ -31,10 +91,13 @@ export interface Brain {
 export function createBrain(behaviors: readonly Behavior[]): Brain {
   const byBand: Record<BehaviorBand, Behavior[]> = { forced: [], player: [], survival: [], duty: [], idle: [] };
   const byId = new Map<string, Behavior>();
+  const keys = new Map<string, number>();
   for (const b of behaviors) {
     byBand[b.band].push(b);
     byId.set(b.id, b);
+    keys.set(b.id, keys.size + 1);
   }
+  const behaviorKey = (b: Behavior | undefined): number => (b ? (keys.get(b.id) ?? 0) : 0);
 
   function choose(ant: Ant, sim: SimState): Behavior | null {
     const mul = BALANCE.a2b.hysteresisMul;
@@ -68,6 +131,12 @@ export function createBrain(behaviors: readonly Behavior[]): Brain {
         const ant = ants[i];
         if (!ant.alive || ant.possessed) continue;
         let current = byId.get(ant.behavior);
+        if (sim.tick >= ant.thinkAt && watchdog(ant, sim, current, behaviorKey)) {
+          current?.exit?.(ant, sim);
+          ant.intent.mode = 'none';
+          current = undefined;
+          ant.behavior = '';
+        }
         if (sim.tick >= ant.thinkAt || !current) {
           const next = choose(ant, sim);
           ant.thinkAt = sim.tick + min + Math.floor(hash01(ant.id, sim.tick, 77) * span);

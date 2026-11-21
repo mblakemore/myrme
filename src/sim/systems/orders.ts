@@ -1,3 +1,4 @@
+import { BALANCE } from '../data/balance';
 import { releaseJob } from './jobsBoard';
 import { v3, v3clone, type Ant, type CellIndex, type Entity, type SimState, type SimSystem, type TaskKind, type Vec3 } from '../../core';
 import { isFoodItem } from '../behaviors/util';
@@ -58,6 +59,18 @@ function clearPlayerTasks(ant: Ant): void {
 }
 
 /**
+ * A direct order (stop included) overrides beacon duty and war-party membership at once: the ant
+ * leaves its beacon / raid and is not drafted again for a while, so once the order is done it
+ * goes back to normal work instead of returning to the beacon it was pulled from.
+ */
+function releaseFromBeacon(sim: SimState, ant: Ant): void {
+  ant.mem['beacon'] = 0;
+  ant.mem['raid'] = 0;
+  ant.mem['raid.ret'] = 0;
+  ant.mem['bc.no'] = sim.tick + Math.round(BALANCE.a2b.beaconOrderCooldown * 30);
+}
+
+/**
  * Player orders → tasks with `source:'player'` on the ordered ants (§5.2, §5.4). Without
  * `queue` an order replaces the ant's player tasks; with it (shift-queue) it is appended behind
  * them. Works the same for one ant or a group; colony tasks stay queued behind and resume later.
@@ -102,6 +115,7 @@ export const ordersSystem: SimSystem = {
       for (const a of victims) {
         if (a.caste === 'queen') continue; // nobody exiles the queen
         clearPlayerTasks(a);
+        releaseFromBeacon(sim, a);
         // an exile gives up her duties: reservations go back to the board
         for (const t of a.tasks) if (t.jobId) releaseJob(sim, a, t.jobId);
         a.tasks.length = 0;
@@ -120,6 +134,7 @@ export const ordersSystem: SimSystem = {
       const ant = sim.getAnt(id);
       if (!ant || ant.colony !== sim.playerColony) continue;
       if (!cmd.queue || cmd.order === 'stop') clearPlayerTasks(ant);
+      releaseFromBeacon(sim, ant);
       if (cmd.order === 'stop') {
         ant.thinkAt = sim.tick;
         continue;

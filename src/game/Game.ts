@@ -131,41 +131,48 @@ export class Game {
     };
     this.qualityPreset = params.quality;
     this.renderer = new Renderer(root, this.sim, this.view, params, [...MODULES, createLookOverride(this.toggles)]);
-    const sim = this.sim;
-    const renderer = this.renderer;
-    this.app = {
-      sim,
-      view: this.view,
-      params,
-      root,
-      canvas: renderer.canvas,
-      command: (cmd: Command) => sim.command(cmd),
-      renderStats: () => renderer.stats(),
-      viewport: () => ({ width: root.clientWidth, height: root.clientHeight }),
-    };
-    this.audio = createAudio();
-    if (opts.attract) {
-      this.input = null;
-      this.ui = null;
-      this.driveAttractCamera(0);
-    } else {
-      this.input = createInput();
-      this.ui = createUi();
-      this.input.init(this.app);
-      this.ui.init(this.app);
-    }
-    this.audio.init(this.app);
+    try {
+      const sim = this.sim;
+      const renderer = this.renderer;
+      this.app = {
+        sim,
+        view: this.view,
+        params,
+        root,
+        canvas: renderer.canvas,
+        command: (cmd: Command) => sim.command(cmd),
+        renderStats: () => renderer.stats(),
+        viewport: () => ({ width: root.clientWidth, height: root.clientHeight }),
+      };
+      this.audio = createAudio();
+      if (opts.attract) {
+        this.input = null;
+        this.ui = null;
+        this.driveAttractCamera(0);
+      } else {
+        this.input = createInput();
+        this.ui = createUi();
+        this.input.init(this.app);
+        this.ui.init(this.app);
+      }
+      this.audio.init(this.app);
 
-    // saved settings → renderer / input (shot mode stays deterministic: defaults only)
-    if (!params.shot) {
-      const store = getSettings();
-      this.applySettings(store.value, 'all');
-      this.unsubSettings = store.subscribe((s, changed) => this.applySettings(s, changed));
+      // saved settings → renderer / input (shot mode stays deterministic: defaults only)
+      if (!params.shot) {
+        const store = getSettings();
+        this.applySettings(store.value, 'all');
+        this.unsubSettings = store.subscribe((s, changed) => this.applySettings(s, changed));
+      }
+      if (!opts.attract) {
+        this.shell = installGameShell(this.app, { options: opts, audio: this.audio, host: hooks.host ?? null, tutorial: !!hooks.tutorial, qualityLocked: hooks.qualityLocked ? params.quality : null });
+      }
+      this.debug = this.createDebugApi(hooks.shell ?? null);
+    } catch (err) {
+      // a half-built game must release its GL context, canvas, listeners and audio, or the next
+      // attempt starts with less (browsers cap live WebGL contexts)
+      this.dispose();
+      throw err;
     }
-    if (!opts.attract) {
-      this.shell = installGameShell(this.app, { options: opts, audio: this.audio, host: hooks.host ?? null, tutorial: !!hooks.tutorial, qualityLocked: hooks.qualityLocked ? params.quality : null });
-    }
-    this.debug = this.createDebugApi(hooks.shell ?? null);
   }
 
   /** Live-apply settings: graphics toggles + render scale + quality preset, input options, keymap. */
@@ -378,22 +385,31 @@ export class Game {
     this.disposed = true;
     this.running = false;
     cancelAnimationFrame(this.raf);
-    this.unsubSettings?.();
-    this.shell?.dispose();
-    this.input?.dispose();
-    this.ui?.dispose();
-    this.audio.dispose();
-    const gl = this.renderer.ctx.renderer;
-    this.renderer.dispose();
+    // Every step is guarded: this also runs on a game whose constructor failed halfway, where any
+    // of these parts may be missing or broken, and one failure must not skip the GL release below.
+    const step = (fn: () => void): void => {
+      try {
+        fn();
+      } catch (err) {
+        console.warn('[myrme] dispose step failed', err);
+      }
+    };
+    step(() => this.unsubSettings?.());
+    step(() => this.shell?.dispose());
+    step(() => this.input?.dispose());
+    step(() => this.ui?.dispose());
+    step(() => this.audio?.dispose());
+    const gl = this.renderer?.ctx.renderer;
+    step(() => this.renderer?.dispose());
     // three's dispose() keeps the GL context alive until GC — browsers cap live contexts (~16),
     // so cycling menu ↔ game must release it explicitly
     try {
-      gl.forceContextLoss();
+      gl?.forceContextLoss();
     } catch {
       /* already lost */
     }
     this.pendingEvents = [];
-    this.debug.ready = false;
+    if (this.debug) this.debug.ready = false;
   }
 }
 

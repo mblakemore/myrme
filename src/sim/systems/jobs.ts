@@ -1,6 +1,7 @@
-import { BEACON_CHANNEL, JOB_KINDS, MATERIALS, Mat, Phero, v3, v3clone, type Ant, type Beacon, type Colony, type Designation, type Job, type JobKind, type SimState, type SimSystem, type Vec3 } from '../../core';
+import { BEACON_CHANNEL, JOB_KINDS, MATERIALS, Mat, Phero, v3, v3clone, type Ant, type Beacon, type Colony, type Creature, type Designation, type Job, type JobKind, type Mover, type SimState, type SimSystem, type Vec3 } from '../../core';
 import { isFoodItem } from '../behaviors/util';
 import { BALANCE } from '../data/balance';
+import { getCreature } from '../data/creatures';
 import { getCaste } from '../data/species';
 import { broodPilePos, chamberAt, dutyTask, getExt, hasPlayerTask, type ColonyExt } from './colonyState';
 import { designationProgress } from './dig';
@@ -224,16 +225,77 @@ function beaconCells(sim: SimState, ext: ColonyExt, b: Beacon) {
   return bc;
 }
 
-function eligible(ant: Ant, b: Beacon): boolean {
+function eligible(sim: SimState, ant: Ant, b: Beacon): boolean {
   if (ant.caste === 'queen' || ant.caste === 'king' || ant.possessed || ant.followId || ant.mem['exiled'] || ant.mem['beacon'] || hasPlayerTask(ant)) return false;
+  // just given a direct order: the beacon does not pull it straight back
+  if ((ant.mem['bc.no'] ?? 0) > sim.tick) return false;
   const th = getCaste(ant.species, ant.caste).thresholds;
   if (b.kind === 'gather') return th.forage !== undefined;
   if (b.kind === 'dig') return th.dig !== undefined && th.dig < 1;
   return true;
 }
 
+/** Per sim: attack beacon id → last tick it had something to do (a hostile near, or nobody there yet). */
+const beaconBusy = new WeakMap<SimState, Map<number, number>>();
+const _movers: Mover[] = [];
+const _bp = v3();
+
+/** The living rival colony whose nest or entrance an Attack beacon sits on (a standing war), if any. */
+function warTarget(sim: SimState, colony: Colony, b: Beacon): Colony | undefined {
+  const r = BALANCE.b1.raid.beaconNestRadius;
+  for (const c of sim.colonies) {
+    if (!c.alive || c.id === colony.id) continue;
+    if (Math.hypot(b.pos.x - c.nestPos.x, b.pos.y - c.nestPos.y, b.pos.z - c.nestPos.z) <= r) return c;
+    for (const e of c.entrances) {
+      sim.world.cellCenter(e, _bp);
+      if (Math.hypot(b.pos.x - _bp.x, b.pos.y - _bp.y, b.pos.z - _bp.z) <= r) return c;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Attack beacons are not permanent: one expires once it has had nothing to fight for
+ * `attackBeaconIdle` seconds (hostiles gone, ants standing around), and in any case after
+ * `attackBeaconLife` — re-placing it starts a fresh one. A beacon on a living rival nest is a
+ * declared war (rivalsRaid.ts musters the party) and stands until that colony falls.
+ */
+function attackBeaconExpired(sim: SimState, colony: Colony, b: Beacon): boolean {
+  const B = BALANCE.a2b;
+  let busy = beaconBusy.get(sim);
+  if (!busy) beaconBusy.set(sim, (busy = new Map()));
+  if (warTarget(sim, colony, b)) {
+    busy.set(b.id, sim.tick);
+    return false;
+  }
+  if (sim.tick - b.createdTick > B.attackBeaconLife * 30) return true;
+  let hostile = false;
+  let manned = false;
+  sim.spatial.queryMovers(b.pos.x, b.pos.y, b.pos.z, b.radius + 2 + BALANCE.b1.combat.bodyRadiusMax, _movers);
+  for (const mv of _movers) {
+    const m = mv as Ant | Creature;
+    if (!m.alive) continue;
+    const dd = Math.hypot(m.pos.x - b.pos.x, m.pos.y - b.pos.y, m.pos.z - b.pos.z);
+    if (m.kind === 'ant') {
+      if (m.colony !== colony.id) hostile ||= dd <= b.radius + 2;
+      else manned ||= dd <= b.radius;
+    } else if ((m.colony === 0 || m.colony !== colony.id) && getCreature(m.def).role !== 'herd') hostile ||= dd <= b.radius + 2 + m.clearance;
+  }
+  // idle clock: runs only while own ants are there and nothing hostile is
+  const last = hostile || !manned ? sim.tick : (busy.get(b.id) ?? b.createdTick);
+  busy.set(b.id, last);
+  return sim.tick - last > B.attackBeaconIdle * 30;
+}
+
 function updateBeacons(sim: SimState, colony: Colony, ext: ColonyExt): void {
   const B = BALANCE.a2b;
+  for (let i = colony.beacons.length - 1; i >= 0; i--) {
+    const b = colony.beacons[i];
+    if (b.kind !== 'attack' || !attackBeaconExpired(sim, colony, b)) continue;
+    colony.beacons.splice(i, 1);
+    beaconBusy.get(sim)?.delete(b.id);
+    removeBeacon(sim, colony, ext, b);
+  }
   for (const b of colony.beacons) {
     if (sim.tick % 30 < B.jobsEveryTicks) {
       const bc = beaconCells(sim, ext, b);
@@ -252,7 +314,7 @@ function updateBeacons(sim: SimState, colony: Colony, ext: ColonyExt): void {
     const range = b.radius * B.beaconCallRange;
     const cands: { ant: Ant; d: number }[] = [];
     for (const a of sim.ants) {
-      if (!a.alive || a.colony !== colony.id || !eligible(a, b)) continue;
+      if (!a.alive || a.colony !== colony.id || !eligible(sim, a, b)) continue;
       let d = Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y, a.pos.z - b.pos.z);
       const fighter = b.kind === 'rally' || b.kind === 'attack';
       if (fighter && a.caste === 'soldier') d *= 0.4; // soldiers answer first and from farther away

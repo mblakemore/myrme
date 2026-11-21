@@ -86,7 +86,14 @@ export class Renderer {
   ) {
     this.canvas = document.createElement('canvas');
     parent.appendChild(this.canvas);
-    const renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: false, powerPreference: 'high-performance', stencil: false, depth: true });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: false, powerPreference: 'high-performance', stencil: false, depth: true });
+    } catch (err) {
+      // no context (GPU busy / lost / too many live contexts): leave no dead canvas behind
+      this.canvas.remove();
+      throw err;
+    }
     this.renderer = renderer;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.NoToneMapping; // tone mapping happens in the effect chain
@@ -132,10 +139,40 @@ export class Renderer {
       stats: { pendingChunks: 0 },
     };
 
-    this.buildChain();
-    this.resize();
-    this.modules = modules;
-    for (const m of modules) m.init(this.ctx);
+    const inited: Module[] = [];
+    this.modules = inited;
+    try {
+      this.buildChain();
+      this.resize();
+      for (const m of modules) {
+        m.init(this.ctx);
+        inited.push(m);
+      }
+      this.modules = modules;
+    } catch (err) {
+      // a failed start must not leak the GL context or the canvas: the browser caps live contexts,
+      // so leaked ones would make every retry fail too
+      for (const m of inited) {
+        try {
+          m.dispose();
+        } catch {
+          /* best effort */
+        }
+      }
+      try {
+        this.composer?.dispose();
+      } catch {
+        /* chain may not exist yet */
+      }
+      renderer.dispose();
+      try {
+        renderer.forceContextLoss();
+      } catch {
+        /* already lost */
+      }
+      this.canvas.remove();
+      throw err;
+    }
   }
 
   get gpu(): string {

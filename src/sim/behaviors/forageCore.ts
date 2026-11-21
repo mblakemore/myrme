@@ -55,7 +55,9 @@ export function foodTarget(sim: SimState, ant: Ant, task: Task): Food | null {
   if (!task.targetId) return null;
   const e = sim.getEntity(task.targetId);
   if (!e) return null;
-  if (e.kind === 'food') return e.amount > 0 && !underWater(sim, e) && !inDangerZone(sim, ant.colony, e.pos) ? e : null;
+  // the colony's own foragers shun a source where nestmates were recently attacked; a player
+  // order to gather there is obeyed (it used to be dropped the moment a danger zone appeared)
+  if (e.kind === 'food') return e.amount > 0 && !underWater(sim, e) && (task.source === 'player' || !inDangerZone(sim, ant.colony, e.pos)) ? e : null;
   if (e.kind === 'item') return !e.carriedBy && isFoodItem(e, ant.colony) ? e : null;
   return null;
 }

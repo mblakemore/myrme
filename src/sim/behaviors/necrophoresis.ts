@@ -1,7 +1,10 @@
-import type { Ant, Behavior, SimState } from '../../core';
+import type { Ant, Behavior, Colony, NavEx, SimState } from '../../core';
 import { BALANCE } from '../data/balance';
 import { makeTask } from '../entities';
 import { dutyTask, nearestChamber } from '../systems/colonyState';
+import { sunSensitive } from '../systems/temperature';
+import { termiteSheeted } from '../systems/termiteBuild';
+import { envState } from '../systems/weatherEnv';
 import { dutyScore, finishDuty, takeJob } from './dutyCommon';
 import { ARRIVED, FAILED, approach, dropCarry, pickUpItem, pileCell, placeCarry } from './util';
 
@@ -10,6 +13,18 @@ function orphanCorpse(ant: Ant, sim: SimState): boolean {
   if (!c || c.kind !== 'item' || c.itemKind !== 'corpse') return false;
   const e = sim.getEntity(c.id);
   return !!e && e.kind === 'item' && e.colony === ant.colony;
+}
+
+/**
+ * Sun-sensitive species (termites) cannot reach a midden out in the sun by day: seekShade pulls
+ * the carrier back under cover at the doorstep and the duty sends it out again, every think,
+ * for as long as the sun is up (the ant shuttles on the spot and starves). They leave the dead
+ * for the night instead.
+ */
+function sunBarred(sim: SimState, ant: Ant, colony: Colony): boolean {
+  if (!sunSensitive(ant) || envState(sim).sun <= BALANCE.b2.sunSensitiveExposure || termiteSheeted(sim, ant)) return false;
+  const midden = nearestChamber(colony, 'midden', ant.pos);
+  return midden.cell >= 0 && (sim.nav as NavEx).isExposed(midden.cell);
 }
 
 /**
@@ -22,6 +37,10 @@ export const necrophoresisBehavior: Behavior = {
   band: 'duty',
   score(ant, sim) {
     if (!dutyTask(ant) && ant.carrying) return orphanCorpse(ant, sim) ? BALANCE.a2b.commitScore : 0;
+    if (!dutyTask(ant)) {
+      const colony = sim.getColony(ant.colony);
+      if (colony && sunBarred(sim, ant, colony)) return 0;
+    }
     return dutyScore(sim, ant, 'carryCorpse', 'carryCorpse', 'nj.corpse');
   },
   run(ant, sim) {
@@ -56,6 +75,12 @@ export const necrophoresisBehavior: Behavior = {
     }
     if (ant.carrying?.id !== item.id) {
       finishDuty(sim, ant, t);
+      return;
+    }
+    // turned back by the sun (seekShade has just held it under cover): put the corpse down here
+    if ((ant.mem['sh.u'] ?? 0) > sim.tick && sunBarred(sim, ant, colony) && ant.cell >= 0 && !(sim.nav as NavEx).isExposed(ant.cell)) {
+      dropCarry(sim, ant);
+      finishDuty(sim, ant, t, 'nj.corpse', 60);
       return;
     }
     const midden = nearestChamber(colony, 'midden', ant.pos);
